@@ -1,95 +1,153 @@
+# app/core/hybrid_search.py
+# Updated to work with the sklearn-based vector store
+
+from typing import List, Dict, Any
+import logging
 from rank_bm25 import BM25Okapi
 import numpy as np
-from typing import List, Dict, Any, Tuple
-import logging
-from app.core.vector_store import VectorStore
-from app.core.embeddings import EmbeddingGenerator
+from app.core.vector_store import VectorStore, Document
 
 logger = logging.getLogger(__name__)
 
 class HybridSearch:
-    def __init__(self, vector_store: VectorStore, embedding_generator: EmbeddingGenerator):
+    """Hybrid search combining semantic and keyword search"""
+    
+    def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
-        self.embedding_generator = embedding_generator
         self.bm25 = None
-        self.corpus = []
-        
-    def build_bm25_index(self, documents: List[Dict[str, Any]]):
-        """Build BM25 index for sparse retrieval"""
-        self.corpus = [doc['content'].lower().split() for doc in documents]
-        self.bm25 = BM25Okapi(self.corpus)
-        logger.info("BM25 index built successfully")
+        self._build_bm25_index()
     
-    def search(self, query: str, k: int = 10, alpha: float = 0.5) -> List[Dict[str, Any]]:
-        """
-        Hybrid search combining dense and sparse retrieval
-        alpha: weight for dense search (1-alpha for sparse)
-        """
-        # Dense search
-        query_embedding = self.embedding_generator.encode_query(query)
-        dense_results = self.vector_store.search(query_embedding, k=k*2)
+    def _build_bm25_index(self):
+        """Build BM25 index from documents"""
+        if not self.vector_store.documents:
+            logger.warning("No documents available for BM25 indexing")
+            return
         
-        # Sparse search
-        sparse_scores = []
-        if self.bm25:
-            tokenized_query = query.lower().split()
-            sparse_scores = self.bm25.get_scores(tokenized_query)
-        
-        # Combine scores
-        combined_results = self._combine_scores(
-            dense_results, 
-            sparse_scores, 
-            alpha=alpha,
-            k=k
-        )
-        
-        return combined_results
-    
-    def _combine_scores(self, dense_results: List[Tuple[Dict, float]], 
-                       sparse_scores: np.ndarray, 
-                       alpha: float, 
-                       k: int) -> List[Dict[str, Any]]:
-        """Combine dense and sparse scores with normalization"""
-        score_dict = {}
-        
-        # Add dense scores
-        for doc, score in dense_results:
-            doc_idx = self.vector_store.id_to_index.get(doc['id'])
-            if doc_idx is not None:
-                score_dict[doc_idx] = {
-                    'doc': doc,
-                    'dense_score': score,
-                    'sparse_score': 0
-                }
-        
-        # Add sparse scores
-        if len(sparse_scores) > 0:
-            # Normalize sparse scores
-            max_sparse = np.max(sparse_scores) if np.max(sparse_scores) > 0 else 1
-            normalized_sparse = sparse_scores / max_sparse
+        try:
+            # Tokenize documents for BM25
+            tokenized_docs = []
+            for doc in self.vector_store.documents:
+                # Simple tokenization
+                tokens = doc.page_content.lower().split()
+                tokenized_docs.append(tokens)
             
-            for idx, score in enumerate(normalized_sparse):
-                if idx in score_dict:
-                    score_dict[idx]['sparse_score'] = score
-                elif idx < len(self.vector_store.documents):
-                    score_dict[idx] = {
-                        'doc': self.vector_store.documents[idx],
-                        'dense_score': 0,
-                        'sparse_score': score
+            self.bm25 = BM25Okapi(tokenized_docs)
+            logger.info(f"Built BM25 index for {len(tokenized_docs)} documents")
+        except Exception as e:
+            logger.error(f"Error building BM25 index: {e}")
+            self.bm25 = None
+    
+    def search(self, query: str, k: int = 5, alpha: float = 0.7) -> List[Document]:
+        """
+        Hybrid search combining semantic and keyword search
+        
+        Args:
+            query: Search query
+            k: Number of results to return
+            alpha: Weight for semantic search (1-alpha for BM25)
+        """
+        if not self.vector_store.documents:
+            logger.warning("No documents available for search")
+            return []
+        
+        try:
+            # Get semantic search results
+            semantic_results = self.vector_store.similarity_search(query, k=min(k*2, len(self.vector_store.documents)))
+            
+            # If BM25 is not available, just return semantic results
+            if not self.bm25:
+                logger.info("Using semantic search only (BM25 not available)")
+                return semantic_results[:k]
+            
+            # Get BM25 results
+            bm25_results = []
+            try:
+                query_tokens = query.lower().split()
+                bm25_scores = self.bm25.get_scores(query_tokens)
+                
+                # Get top documents by BM25 score
+                top_bm25_indices = sorted(
+                    range(len(bm25_scores)), 
+                    key=lambda i: bm25_scores[i], 
+                    reverse=True
+                )[:min(k*2, len(self.vector_store.documents))]
+                
+                for idx in top_bm25_indices:
+                    if idx < len(self.vector_store.documents):
+                        doc = self.vector_store.documents[idx]
+                        doc_copy = Document(
+                            page_content=doc.page_content,
+                            metadata={**doc.metadata, 'bm25_score': float(bm25_scores[idx])}
+                        )
+                        bm25_results.append(doc_copy)
+            except Exception as e:
+                logger.error(f"Error in BM25 search: {e}")
+                # Fall back to semantic only
+                return semantic_results[:k]
+            
+            # Combine results using hybrid scoring
+            combined_scores = {}
+            
+            # Add semantic scores
+            for i, doc in enumerate(semantic_results):
+                doc_text = doc.page_content
+                semantic_score = doc.metadata.get('similarity_score', 0.0)
+                combined_scores[doc_text] = {
+                    'document': doc,
+                    'semantic_score': semantic_score,
+                    'bm25_score': 0.0,
+                    'hybrid_score': alpha * semantic_score
+                }
+            
+            # Add BM25 scores
+            max_bm25_score = max([doc.metadata.get('bm25_score', 0.0) for doc in bm25_results]) if bm25_results else 1.0
+            if max_bm25_score == 0:
+                max_bm25_score = 1.0
+                
+            for doc in bm25_results:
+                doc_text = doc.page_content
+                bm25_score = doc.metadata.get('bm25_score', 0.0) / max_bm25_score  # Normalize
+                
+                if doc_text in combined_scores:
+                    combined_scores[doc_text]['bm25_score'] = bm25_score
+                    combined_scores[doc_text]['hybrid_score'] = (
+                        alpha * combined_scores[doc_text]['semantic_score'] + 
+                        (1 - alpha) * bm25_score
+                    )
+                else:
+                    combined_scores[doc_text] = {
+                        'document': doc,
+                        'semantic_score': 0.0,
+                        'bm25_score': bm25_score,
+                        'hybrid_score': (1 - alpha) * bm25_score
                     }
-        
-        # Calculate combined scores
-        results = []
-        for item in score_dict.values():
-            combined_score = (alpha * item['dense_score'] + 
-                            (1 - alpha) * item['sparse_score'])
-            doc = item['doc'].copy()
-            doc['score'] = combined_score
-            doc['dense_score'] = item['dense_score']
-            doc['sparse_score'] = item['sparse_score']
-            results.append(doc)
-        
-        # Sort by combined score
-        results.sort(key=lambda x: x['score'], reverse=True)
-        
-        return results[:k]
+            
+            # Sort by hybrid score and return top k
+            sorted_results = sorted(
+                combined_scores.values(),
+                key=lambda x: x['hybrid_score'],
+                reverse=True
+            )
+            
+            final_results = []
+            for result in sorted_results[:k]:
+                doc = result['document']
+                # Add all scores to metadata
+                doc_copy = Document(
+                    page_content=doc.page_content,
+                    metadata={
+                        **doc.metadata,
+                        'semantic_score': result['semantic_score'],
+                        'bm25_score': result['bm25_score'],
+                        'hybrid_score': result['hybrid_score']
+                    }
+                )
+                final_results.append(doc_copy)
+            
+            logger.info(f"Hybrid search returned {len(final_results)} results")
+            return final_results
+            
+        except Exception as e:
+            logger.error(f"Error in hybrid search: {e}")
+            # Fallback to simple semantic search
+            return self.vector_store.similarity_search(query, k)
