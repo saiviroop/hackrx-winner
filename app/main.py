@@ -6,6 +6,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from app.api import routes
+from app.api.hackrx_routes import router as hackrx_router  # Add this import
 from app.config import get_settings
 from app.utils.logger import setup_logging
 
@@ -18,7 +19,7 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
-    logger.info("Starting Insurance RAG API...")
+    logger.info("Starting Insurance RAG API for HackRx 6.0...")
     # Initialize components here if needed
     yield
     # Shutdown
@@ -26,8 +27,8 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Insurance Document RAG API",
-    description="High-performance RAG system for insurance document Q&A",
+    title="Insurance Document RAG API - HackRx 6.0",
+    description="High-performance RAG system for insurance document Q&A - HackRx Contest",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -50,16 +51,21 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-Process-Time"] = str(process_time)
     return response
 
-# Include routers
+# Include your existing routers
 app.include_router(routes.router, prefix="/api/v1", tags=["queries"])
+
+# Include HackRx contest routes (NO PREFIX - required by contest)
+app.include_router(hackrx_router, tags=["hackrx-contest"])
 
 # Root endpoint
 @app.get("/")
 async def root():
     return {
-        "message": "Insurance RAG API",
+        "message": "Insurance RAG API - HackRx 6.0",
         "version": "1.0.0",
-        "docs": "/docs"
+        "docs": "/docs",
+        "contest_endpoint": "/hackrx/run",
+        "health_check": "/hackrx/health"
     }
 
 # Exception handler
