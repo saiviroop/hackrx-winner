@@ -1,125 +1,144 @@
-from app.core.vector_store import Document
-import os
-import hashlib
-from typing import List, Dict, Any, Tuple
-import pypdf
-import pdfplumber
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-import re
+# app/core/document_processor.py
+# Simplified version without LangChain dependency
+
 import logging
+from typing import List, Dict, Any
+import pypdf
+from pathlib import Path
+import re
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-class DocumentProcessor:
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 100):
+@dataclass
+class Document:
+    page_content: str
+    metadata: Dict[str, Any]
+
+class SimpleTextSplitter:
+    """Simple text splitter replacement for LangChain"""
+    
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", ".", ";", ",", " ", ""],
-            length_function=len,
-        )
+    
+    def split_text(self, text: str) -> List[str]:
+        """Split text into chunks"""
+        if len(text) <= self.chunk_size:
+            return [text]
         
-    def extract_text_from_pdf(self, pdf_path: str) -> Tuple[str, Dict[str, Any]]:
-        """Extract text and metadata from PDF"""
-        text = ""
-        metadata = {
-            "source": pdf_path,
-            "pages": 0,
-            "file_hash": self._get_file_hash(pdf_path)
-        }
+        chunks = []
+        start = 0
         
+        while start < len(text):
+            end = start + self.chunk_size
+            
+            # Try to break at sentence boundary
+            if end < len(text):
+                # Look for sentence ending punctuation
+                for i in range(end, start + self.chunk_size//2, -1):
+                    if text[i] in '.!?\n':
+                        end = i + 1
+                        break
+            
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            
+            start = end - self.chunk_overlap
+            if start >= len(text):
+                break
+        
+        return chunks
+
+class DocumentProcessor:
+    """Process documents and create text chunks"""
+    
+    def __init__(self):
+        self.text_splitter = SimpleTextSplitter(chunk_size=1000, chunk_overlap=200)
+        
+    def process_document(self, file_path: str) -> List[Document]:
+        """Process a single document and return chunks"""
         try:
-            # Try pdfplumber first (better for tables)
-            with pdfplumber.open(pdf_path) as pdf:
-                metadata["pages"] = len(pdf.pages)
-                metadata["title"] = pdf.metadata.get('Title', os.path.basename(pdf_path))
-                
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-                        
+            logger.info(f"Processing document: {file_path}")
+            
+            # Extract text from PDF
+            text = self._extract_text_from_pdf(file_path)
+            
+            if not text.strip():
+                logger.warning(f"No text extracted from {file_path}")
+                return []
+            
+            # Split into chunks
+            chunks = self.text_splitter.split_text(text)
+            
+            # Create Document objects
+            documents = []
+            filename = Path(file_path).name
+            
+            for i, chunk in enumerate(chunks):
+                if chunk.strip():  # Only add non-empty chunks
+                    doc = Document(
+                        page_content=chunk,
+                        metadata={
+                            'source': filename,
+                            'chunk_id': i,
+                            'chunk_size': len(chunk)
+                        }
+                    )
+                    documents.append(doc)
+            
+            logger.info(f"Created {len(documents)} chunks from {filename}")
+            return documents
+            
         except Exception as e:
-            logger.warning(f"pdfplumber failed, trying pypdf: {e}")
-            # Fallback to pypdf
-            with open(pdf_path, 'rb') as file:
+            logger.error(f"Error processing document {file_path}: {str(e)}")
+            return []
+    
+    def _extract_text_from_pdf(self, file_path: str) -> str:
+        """Extract text from PDF using pypdf"""
+        try:
+            text = ""
+            with open(file_path, 'rb') as file:
                 pdf_reader = pypdf.PdfReader(file)
-                metadata["pages"] = len(pdf_reader.pages)
                 
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-                    
-        return self._clean_text(text), metadata
+                for page_num, page in enumerate(pdf_reader.pages):
+                    try:
+                        page_text = page.extract_text()
+                        if page_text:
+                            # Clean up the text
+                            page_text = self._clean_text(page_text)
+                            text += f"\nPage {page_num + 1}:\n{page_text}\n"
+                    except Exception as e:
+                        logger.warning(f"Error extracting text from page {page_num + 1}: {str(e)}")
+                        continue
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error reading PDF file {file_path}: {str(e)}")
+            return ""
     
     def _clean_text(self, text: str) -> str:
-        """Clean and normalize text"""
+        """Clean and normalize extracted text"""
         # Remove excessive whitespace
         text = re.sub(r'\s+', ' ', text)
-        # Remove special characters but keep Indian currency symbol
-        text = re.sub(r'[^\w\s\.\,\;\:\-\(\)\/\₹\%]', '', text)
-        # Fix common OCR errors
-        text = text.replace('lnsured', 'Insured')
-        text = text.replace('Hospit al', 'Hospital')
+        
+        # Remove special characters that might cause issues
+        text = re.sub(r'[^\w\s\.\,\!\?\:\;\-\(\)\[\]\"\'\/\%\$\@]', '', text)
+        
+        # Normalize line breaks
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        
         return text.strip()
     
-    def create_chunks(self, text: str, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Create overlapping chunks with metadata"""
-        chunks = self.text_splitter.split_text(text)
+    def process_documents(self, file_paths: List[str]) -> List[Document]:
+        """Process multiple documents"""
+        all_documents = []
         
-        chunk_documents = []
-        for i, chunk in enumerate(chunks):
-            chunk_metadata = {
-                **metadata,
-                "chunk_id": i,
-                "chunk_size": len(chunk),
-                "total_chunks": len(chunks)
-            }
-            
-            # Add section detection
-            section = self._detect_section(chunk)
-            if section:
-                chunk_metadata["section"] = section
-                
-            chunk_documents.append({
-                "content": chunk,
-                "metadata": chunk_metadata
-            })
-            
-        return chunk_documents
-    
-    def _detect_section(self, text: str) -> str:
-        """Detect which section of document this chunk belongs to"""
-        text_lower = text.lower()
+        for file_path in file_paths:
+            documents = self.process_document(file_path)
+            all_documents.extend(documents)
         
-        if "claim" in text_lower and "procedure" in text_lower:
-            return "claims_procedure"
-        elif "exclusion" in text_lower:
-            return "exclusions"
-        elif "coverage" in text_lower or "benefit" in text_lower:
-            return "coverage"
-        elif "definition" in text_lower:
-            return "definitions"
-        elif "premium" in text_lower:
-            return "premium"
-        else:
-            return "general"
-    
-    def _get_file_hash(self, file_path: str) -> str:
-        """Generate file hash for caching"""
-        with open(file_path, 'rb') as f:
-            return hashlib.md5(f.read()).hexdigest()
-    
-    def process_documents(self, pdf_paths: List[str]) -> List[Dict[str, Any]]:
-        """Process multiple PDF documents"""
-        all_chunks = []
-        
-        for pdf_path in pdf_paths:
-            logger.info(f"Processing: {pdf_path}")
-            text, metadata = self.extract_text_from_pdf(pdf_path)
-            chunks = self.create_chunks(text, metadata)
-            all_chunks.extend(chunks)
-            
-        logger.info(f"Total chunks created: {len(all_chunks)}")
-        return all_chunks
+        logger.info(f"Processed {len(file_paths)} files, created {len(all_documents)} total chunks")
+        return all_documents
