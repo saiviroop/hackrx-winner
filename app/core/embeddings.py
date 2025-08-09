@@ -1,46 +1,51 @@
-from sentence_transformers import SentenceTransformer
-import numpy as np
-from typing import List, Union
-import torch
+# app/core/embeddings.py
+# OpenAI-only embeddings - no sentence_transformers
+
 import logging
-from functools import lru_cache
+from typing import List
+import openai
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 class EmbeddingGenerator:
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {self.device}")
-        
-        self.model = SentenceTransformer(model_name, device=self.device)
-        self.embedding_dim = self.model.get_sentence_embedding_dimension()
-        
-    @lru_cache(maxsize=1000)
-    def _cached_encode(self, text: str) -> np.ndarray:
-        """Cache individual embeddings"""
-        return self.model.encode(text, convert_to_numpy=True)
+    """Generate embeddings using OpenAI API"""
     
-    def encode(self, texts: Union[str, List[str]], batch_size: int = 32) -> np.ndarray:
-        """Generate embeddings for text(s)"""
-        if isinstance(texts, str):
-            return self._cached_encode(texts)
+    def __init__(self):
+        self.client = openai.OpenAI(api_key=settings.openai_api_key)
+        self.model = "text-embedding-3-small"  # Cheaper, faster model
         
-        # Batch processing for multiple texts
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for a list of texts"""
         embeddings = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            batch_embeddings = self.model.encode(
-                batch,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-                batch_size=batch_size
-            )
-            embeddings.append(batch_embeddings)
         
-        return np.vstack(embeddings) if embeddings else np.array([])
+        for text in texts:
+            try:
+                response = self.client.embeddings.create(
+                    model=self.model,
+                    input=text[:8000]  # Limit length
+                )
+                embeddings.append(response.data[0].embedding)
+                
+                # Small delay to avoid rate limits
+                import time
+                time.sleep(0.05)
+                
+            except Exception as e:
+                logger.error(f"Error generating embedding: {e}")
+                embeddings.append([0.0] * 1536)  # Zero vector fallback
+        
+        return embeddings
     
-    def encode_query(self, query: str) -> np.ndarray:
-        """Encode query with query-specific preprocessing"""
-        # Add query markers for better retrieval
-        query_text = f"Query: {query}"
-        return self.encode(query_text)
+    def generate_embedding(self, text: str) -> List[float]:
+        """Generate single embedding"""
+        try:
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=text[:8000]
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Error generating embedding: {e}")
+            return [0.0] * 1536
