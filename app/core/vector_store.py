@@ -1,5 +1,5 @@
 # app/core/vector_store.py
-# Simple vector store using sklearn instead of FAISS
+# FINAL VERSION - Works with the DocumentProcessor
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -7,14 +7,11 @@ from typing import List, Dict, Any, Optional
 import logging
 import pickle
 from pathlib import Path
-from dataclasses import dataclass
+
+# Import Document from document_processor
+from app.core.document_processor import Document
 
 logger = logging.getLogger(__name__)
-
-@dataclass
-class Document:
-    page_content: str
-    metadata: Dict[str, Any]
 
 class VectorStore:
     """Simple vector store using sklearn for semantic search"""
@@ -48,7 +45,7 @@ class VectorStore:
         texts = [doc.page_content for doc in documents]
         
         # Generate embeddings in batches to manage memory
-        batch_size = 16  # Smaller batch size for Railway
+        batch_size = 16  # Smaller batch size for stability
         embeddings = []
         
         for i in range(0, len(texts), batch_size):

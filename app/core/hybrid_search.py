@@ -1,5 +1,5 @@
 # app/core/hybrid_search.py
-# Updated to work with the sklearn-based vector store
+# FINAL VERSION - Works with updated vector store
 
 from typing import List, Dict, Any
 import logging

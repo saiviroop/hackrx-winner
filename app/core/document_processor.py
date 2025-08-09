@@ -1,8 +1,8 @@
 # app/core/document_processor.py
-# Simplified version without LangChain dependency
+# FINAL VERSION - Compatible with your existing code
 
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import pypdf
 from pathlib import Path
 import re
@@ -54,8 +54,20 @@ class SimpleTextSplitter:
 class DocumentProcessor:
     """Process documents and create text chunks"""
     
-    def __init__(self):
-        self.text_splitter = SimpleTextSplitter(chunk_size=1000, chunk_overlap=200)
+    def __init__(self, 
+                 chunk_size: int = 1000, 
+                 chunk_overlap: int = 200,
+                 max_docs: Optional[int] = None,
+                 **kwargs):  # Accept any other parameters
+        """Initialize with flexible parameters to match your existing code"""
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.max_docs = max_docs
+        self.text_splitter = SimpleTextSplitter(
+            chunk_size=chunk_size, 
+            chunk_overlap=chunk_overlap
+        )
+        logger.info(f"DocumentProcessor initialized with chunk_size={chunk_size}, chunk_overlap={chunk_overlap}")
         
     def process_document(self, file_path: str) -> List[Document]:
         """Process a single document and return chunks"""
@@ -83,7 +95,8 @@ class DocumentProcessor:
                         metadata={
                             'source': filename,
                             'chunk_id': i,
-                            'chunk_size': len(chunk)
+                            'chunk_size': len(chunk),
+                            'file_path': file_path
                         }
                     )
                     documents.append(doc)
@@ -94,6 +107,22 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Error processing document {file_path}: {str(e)}")
             return []
+    
+    def process_documents(self, file_paths: List[str]) -> List[Document]:
+        """Process multiple documents"""
+        all_documents = []
+        
+        for file_path in file_paths:
+            documents = self.process_document(file_path)
+            all_documents.extend(documents)
+            
+            # Respect max_docs limit if set
+            if self.max_docs and len(all_documents) >= self.max_docs:
+                all_documents = all_documents[:self.max_docs]
+                break
+        
+        logger.info(f"Processed {len(file_paths)} files, created {len(all_documents)} total chunks")
+        return all_documents
     
     def _extract_text_from_pdf(self, file_path: str) -> str:
         """Extract text from PDF using pypdf"""
@@ -131,14 +160,6 @@ class DocumentProcessor:
         text = text.replace('\n', ' ').replace('\r', ' ')
         
         return text.strip()
-    
-    def process_documents(self, file_paths: List[str]) -> List[Document]:
-        """Process multiple documents"""
-        all_documents = []
-        
-        for file_path in file_paths:
-            documents = self.process_document(file_path)
-            all_documents.extend(documents)
-        
-        logger.info(f"Processed {len(file_paths)} files, created {len(all_documents)} total chunks")
-        return all_documents
+
+# For backward compatibility
+RecursiveCharacterTextSplitter = SimpleTextSplitter
