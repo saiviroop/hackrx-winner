@@ -1,8 +1,6 @@
 # app/core/vector_store.py
-# Ultra-lightweight version using OpenAI embeddings
+# Ultra-minimal version without NumPy/SciKit-Learn
 
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 from typing import List, Dict, Any, Optional
 import logging
 import pickle
@@ -15,26 +13,45 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 class VectorStore:
-    """Ultra-lightweight vector store using OpenAI embeddings"""
+    """Ultra-minimal vector store using only OpenAI embeddings"""
     
     def __init__(self, persist_directory: Optional[str] = None):
         self.documents: List[Document] = []
-        self.embeddings: List[np.ndarray] = []
+        self.embeddings: List[List[float]] = []
         self.client = openai.OpenAI(api_key=settings.openai_api_key)
         self.persist_directory = persist_directory
         
-    def _get_embedding(self, text: str) -> np.ndarray:
+    def _get_embedding(self, text: str) -> List[float]:
         """Get embedding from OpenAI"""
         try:
             response = self.client.embeddings.create(
-                model="text-embedding-3-small",  # Smaller, cheaper model
-                input=text[:8000]  # Limit text length
+                model="text-embedding-3-small",  # Cheaper, smaller model
+                input=text[:8000]  # Limit text length to avoid token limits
             )
-            return np.array(response.data[0].embedding)
+            return response.data[0].embedding
         except Exception as e:
             logger.error(f"Error getting OpenAI embedding: {e}")
-            # Return zero vector as fallback
-            return np.zeros(1536)  # text-embedding-3-small dimension
+            # Return zero vector as fallback (1536 dimensions for text-embedding-3-small)
+            return [0.0] * 1536
+    
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Simple cosine similarity without numpy"""
+        try:
+            # Calculate dot product
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            
+            # Calculate magnitudes
+            magnitude1 = sum(a * a for a in vec1) ** 0.5
+            magnitude2 = sum(b * b for b in vec2) ** 0.5
+            
+            # Avoid division by zero
+            if magnitude1 == 0 or magnitude2 == 0:
+                return 0.0
+            
+            return dot_product / (magnitude1 * magnitude2)
+        except Exception as e:
+            logger.error(f"Error calculating cosine similarity: {e}")
+            return 0.0
     
     def add_documents(self, documents: List[Document]):
         """Add documents to the vector store"""
@@ -59,7 +76,7 @@ class VectorStore:
             except Exception as e:
                 logger.error(f"Error processing document {i+1}: {e}")
                 # Add zero embedding for failed documents
-                embeddings.append(np.zeros(1536))
+                embeddings.append([0.0] * 1536)
         
         # Store documents and embeddings
         self.documents.extend(documents)
@@ -83,19 +100,26 @@ class VectorStore:
                 return self.documents[:k]
             
             # Calculate similarities
-            similarities = cosine_similarity([query_embedding], self.embeddings)[0]
+            similarities = []
+            for doc_embedding in self.embeddings:
+                similarity = self._cosine_similarity(query_embedding, doc_embedding)
+                similarities.append(similarity)
             
             # Get top k most similar documents
             k = min(k, len(self.documents))
-            top_indices = np.argsort(similarities)[::-1][:k]
             
+            # Create list of (similarity, index) pairs and sort by similarity
+            similarity_indices = [(similarities[i], i) for i in range(len(similarities))]
+            similarity_indices.sort(key=lambda x: x[0], reverse=True)
+            
+            # Get top k results
             results = []
-            for idx in top_indices:
+            for similarity, idx in similarity_indices[:k]:
                 if idx < len(self.documents):
                     doc = self.documents[idx]
                     doc_copy = Document(
                         page_content=doc.page_content,
-                        metadata={**doc.metadata, 'similarity_score': float(similarities[idx])}
+                        metadata={**doc.metadata, 'similarity_score': similarity}
                     )
                     results.append(doc_copy)
             
