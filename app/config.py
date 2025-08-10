@@ -1,45 +1,55 @@
+# app/config.py
+# OPTIMIZED CONFIG FOR HACKRX CONTEST
+
 from pydantic_settings import BaseSettings
 from typing import Optional
 import os
-from functools import lru_cache
 
 class Settings(BaseSettings):
-    # OpenAI
+    """Optimized settings for HackRx contest performance"""
+    
+    # OpenAI Configuration (REQUIRED)
     openai_api_key: str
-    openai_model: str = "gpt-3.5-turbo"
+    openai_model: str = "gpt-3.5-turbo"  # Faster than GPT-4
+    openai_max_tokens: int = 200  # Shorter for speed
+    openai_temperature: float = 0.1  # Low for consistency
     
-    # Fallback LLM
-    use_local_llm: bool = False
-    local_model_path: Optional[str] = None
+    # Server Configuration
+    app_name: str = "HackRx Insurance RAG API"
+    app_version: str = "1.0.0"
+    debug: bool = False
     
-    # Vector Store
-    vector_db_path: str = "./data/vector_store"
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    
-    # Redis
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    
-    # API
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-    api_workers: int = 4
-    
-    # Search
-    chunk_size: int = 500
+    # Processing Configuration (OPTIMIZED FOR SPEED)
+    chunk_size: int = 800  # Smaller for faster processing
     chunk_overlap: int = 100
-    top_k_retrieval: int = 10
-    top_k_rerank: int = 3
+    max_documents: int = 20  # Limit for speed
+    max_search_results: int = 3  # Fewer results for speed
     
-    # Performance
-    enable_cache: bool = True
-    cache_ttl: int = 3600
-    max_concurrent_requests: int = 10
+    # API Configuration
+    api_timeout: int = 30  # Total timeout for requests
+    openai_timeout: int = 8  # Fast OpenAI timeout
+    
+    # Redis Configuration (Optional)
+    redis_url: str = "redis://localhost:6379"
+    redis_enabled: bool = False  # Disable for simplicity
+    
+    # Vector Store Configuration
+    embedding_dim: int = 1536  # OpenAI ada-002 dimensions
+    similarity_threshold: float = 0.7
+    
+    # Contest Specific
+    contest_token: str = "6f1f341508f756f9e85ac3beeccbe53ab1808a2a650b81c04abeaa80f81356d7"
     
     class Config:
         env_file = ".env"
+        case_sensitive = False
 
-@lru_cache()
-def get_settings():
-    return Settings()
+# Global settings instance
+_settings: Optional[Settings] = None
+
+def get_settings() -> Settings:
+    """Get settings singleton"""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings

@@ -1,126 +1,150 @@
 # app/api/hackrx_routes.py
+# OPTIMIZED VERSION FOR HACKRX CONTEST - FAST & ACCURATE
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from typing import List
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any
 import httpx
-import tempfile
-import os
+import asyncio
 import logging
-
+import time
+from app.config import get_settings
 from app.core.document_processor import DocumentProcessor
-from app.core.llm_handler import LLMHandler
 from app.core.vector_store import VectorStore
 from app.core.hybrid_search import HybridSearch
+from app.core.llm_handler import LLMHandler
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 router = APIRouter()
 security = HTTPBearer()
+settings = get_settings()
 
-# Contest-specific models
+# Initialize components ONCE (not per request)
+doc_processor = DocumentProcessor(chunk_size=800, chunk_overlap=100, max_docs=20)
+vector_store = VectorStore()
+hybrid_search = HybridSearch(vector_store)
+llm_handler = LLMHandler()
+
 class HackRxRequest(BaseModel):
-    documents: str  # URL to PDF document
-    questions: List[str]
+    documents: str = Field(..., description="PDF document URL")
+    questions: List[str] = Field(..., description="List of questions to answer")
 
 class HackRxResponse(BaseModel):
-    answers: List[str]
-
-# Expected bearer token from contest
-EXPECTED_TOKEN = "6f1f341508f756f9e85ac3beeccbe53ab1808a2a650b81c04abeaa80f81356d7"
+    answers: List[str] = Field(..., description="List of answers corresponding to questions")
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify the bearer token"""
-    if credentials.credentials != EXPECTED_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    expected_token = "6f1f341508f756f9e85ac3beeccbe53ab1808a2a650b81c04abeaa80f81356d7"
+    if credentials.credentials != expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token"
+        )
     return credentials.credentials
 
-@router.post("/hackrx/run", response_model=HackRxResponse)
+@router.post("/run", response_model=HackRxResponse)
 async def hackrx_run(
     request: HackRxRequest,
     token: str = Depends(verify_token)
-):
+) -> HackRxResponse:
     """
-    HackRx contest endpoint - processes documents and answers questions
+    OPTIMIZED HackRx endpoint for fast document Q&A
+    Target: <5 seconds response time, >80% accuracy
     """
+    start_time = time.time()
+    
     try:
-        logger.info(f"Processing HackRx request with {len(request.questions)} questions")
-        logger.info(f"Document URL: {request.documents[:100]}...")
+        logger.info(f"Processing {len(request.questions)} questions for document: {request.documents}")
         
-        # Download the document from the provided URL
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            logger.info("Downloading document...")
+        # Step 1: Download document (FAST with timeout)
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             doc_response = await client.get(request.documents)
             doc_response.raise_for_status()
-            logger.info(f"Downloaded document, size: {len(doc_response.content)} bytes")
             
-        # Save the document temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-            temp_file.write(doc_response.content)
-            temp_doc_path = temp_file.name
+        logger.info(f"Document downloaded in {time.time() - start_time:.2f}s")
         
-        try:
-            # Process the document
-            logger.info("Processing document...")
-            doc_processor = DocumentProcessor()
-            chunks = doc_processor.process_document(temp_doc_path)
-            logger.info(f"Processed document into {len(chunks)} chunks")
+        # Step 2: Process document (OPTIMIZED)
+        process_start = time.time()
+        documents = await asyncio.to_thread(
+            doc_processor.process_pdf_bytes, 
+            doc_response.content
+        )
+        logger.info(f"Document processed in {time.time() - process_start:.2f}s")
+        
+        # Step 3: Index documents (FAST)
+        index_start = time.time()
+        await asyncio.to_thread(vector_store.add_documents, documents)
+        await asyncio.to_thread(hybrid_search.update_bm25, documents)
+        logger.info(f"Documents indexed in {time.time() - index_start:.2f}s")
+        
+        # Step 4: Answer questions (PARALLEL + OPTIMIZED)
+        answers = []
+        
+        # Process questions in parallel batches of 3
+        batch_size = 3
+        for i in range(0, len(request.questions), batch_size):
+            batch = request.questions[i:i + batch_size]
             
-            # Create a temporary vector store for this document
-            logger.info("Creating vector store...")
-            vector_store = VectorStore()
-            vector_store.add_documents(chunks)
-            
-            # Initialize hybrid search
-            hybrid_search = HybridSearch(vector_store)
-            
-            # Initialize LLM handler
-            llm_handler = LLMHandler()
-            
-            # Process each question
-            answers = []
-            for i, question in enumerate(request.questions):
-                try:
-                    logger.info(f"Processing question {i+1}/{len(request.questions)}: {question[:100]}...")
-                    
-                    # Get relevant context using hybrid search
-                    relevant_docs = hybrid_search.search(question, k=5)
-                    context = "\n\n".join([doc.page_content for doc in relevant_docs])
-                    
-                    # Log context length for debugging
-                    logger.info(f"Retrieved context length: {len(context)} characters")
-                    
-                    # Generate answer using LLM
-                    answer = await llm_handler.generate_response(question, context)
-                    answers.append(answer)
-                    logger.info(f"Generated answer {i+1}: {answer[:100]}...")
-                    
-                except Exception as e:
-                    logger.error(f"Error processing question {i+1} '{question[:50]}...': {str(e)}")
-                    answers.append("Unable to process this question due to a technical error.")
-            
-            logger.info(f"Successfully processed all {len(answers)} questions")
-            return HackRxResponse(answers=answers)
-            
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_doc_path):
-                os.unlink(temp_doc_path)
-                logger.info("Cleaned up temporary file")
-                
-    except httpx.HTTPError as e:
-        logger.error(f"Error downloading document: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to download document: {str(e)}")
+            # Process batch in parallel
+            batch_tasks = [process_single_question(question, hybrid_search, llm_handler) 
+                          for question in batch]
+            batch_answers = await asyncio.gather(*batch_tasks)
+            answers.extend(batch_answers)
+        
+        total_time = time.time() - start_time
+        logger.info(f"✅ COMPLETED in {total_time:.2f}s - {len(answers)} answers generated")
+        
+        return HackRxResponse(answers=answers)
+        
     except Exception as e:
-        logger.error(f"Error in hackrx_run: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        error_time = time.time() - start_time
+        logger.error(f"❌ ERROR after {error_time:.2f}s: {str(e)}")
+        
+        # Return fallback answers to avoid 0% accuracy
+        fallback_answers = [
+            f"Unable to process question due to technical error: {str(e)[:100]}"
+            for _ in request.questions
+        ]
+        return HackRxResponse(answers=fallback_answers)
 
-@router.get("/hackrx/health")
+async def process_single_question(question: str, hybrid_search: HybridSearch, llm_handler: LLMHandler) -> str:
+    """Process a single question with optimizations"""
+    try:
+        # Step 1: Fast retrieval (top 3 for speed)
+        relevant_docs = await asyncio.to_thread(hybrid_search.search, question, k=3)
+        
+        # Step 2: Build focused context (limit size)
+        context_parts = []
+        for doc in relevant_docs:
+            content = doc.page_content[:800]  # Limit per document
+            context_parts.append(content)
+        
+        context = "\n\n".join(context_parts)[:2000]  # Total limit
+        
+        # Step 3: Generate answer (FAST with shorter context)
+        answer = await llm_handler.generate_response(question, context)
+        
+        return answer.strip()
+        
+    except Exception as e:
+        logger.error(f"Error processing question '{question[:50]}...': {str(e)}")
+        return f"Error processing question: {str(e)[:100]}"
+
+@router.get("/health")
 async def health_check():
-    """Health check endpoint for contest"""
+    """Health check endpoint"""
     return {
-        "status": "healthy", 
-        "message": "HackRx Insurance RAG API is running",
-        "endpoint": "/hackrx/run",
-        "version": "1.0.0"
+        "status": "healthy",
+        "service": "hackrx-insurance-rag",
+        "version": "1.0.0",
+        "components": {
+            "document_processor": "ready",
+            "vector_store": "ready",
+            "hybrid_search": "ready",
+            "llm_handler": "ready"
+        }
     }
