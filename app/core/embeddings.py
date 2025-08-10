@@ -1,5 +1,5 @@
 # app/core/embeddings.py
-# OpenAI-only embeddings - no sentence_transformers
+# FINAL VERSION - accepts model parameter
 
 import logging
 from typing import List
@@ -12,9 +12,11 @@ settings = get_settings()
 class EmbeddingGenerator:
     """Generate embeddings using OpenAI API"""
     
-    def __init__(self):
+    def __init__(self, model_name: str = None):
+        """Initialize with optional model name (ignored, we use OpenAI)"""
         self.client = openai.OpenAI(api_key=settings.openai_api_key)
-        self.model = "text-embedding-3-small"  # Cheaper, faster model
+        self.model = "text-embedding-3-small"  # Always use OpenAI model
+        logger.info(f"EmbeddingGenerator initialized (using OpenAI {self.model})")
         
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for a list of texts"""
