@@ -1,5 +1,5 @@
 # app/core/embeddings.py
-# FINAL VERSION - accepts model parameter
+# FINAL VERSION with embedding_dim attribute
 
 import logging
 from typing import List
@@ -16,6 +16,7 @@ class EmbeddingGenerator:
         """Initialize with optional model name (ignored, we use OpenAI)"""
         self.client = openai.OpenAI(api_key=settings.openai_api_key)
         self.model = "text-embedding-3-small"  # Always use OpenAI model
+        self.embedding_dim = 1536  # OpenAI text-embedding-3-small dimension
         logger.info(f"EmbeddingGenerator initialized (using OpenAI {self.model})")
         
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -36,7 +37,7 @@ class EmbeddingGenerator:
                 
             except Exception as e:
                 logger.error(f"Error generating embedding: {e}")
-                embeddings.append([0.0] * 1536)  # Zero vector fallback
+                embeddings.append([0.0] * self.embedding_dim)  # Zero vector fallback
         
         return embeddings
     
@@ -50,4 +51,4 @@ class EmbeddingGenerator:
             return response.data[0].embedding
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
-            return [0.0] * 1536
+            return [0.0] * self.embedding_dim
